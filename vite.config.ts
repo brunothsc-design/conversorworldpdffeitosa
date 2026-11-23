@@ -6,6 +6,10 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
+    base: './',
+    build: {
+      target: ['es2020', 'chrome87', 'safari14'],
+    },
     plugins: [
       react(),
       tailwindcss(),

@@ -10,8 +10,26 @@ import {
   Paragraph,
   TextRun,
 } from 'docx';
+import { sanitizeDownloadFileName } from '../utils/webview';
+
+const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024; // 50 MB limit for safe WebView memory usage
+const MAX_PDF_PAGES = 300;
+const MAX_IMAGE_DIMENSION = 4096;
+const SAFE_RASTER_DATA_URI_RE = /^data:image\/(png|jpeg|jpg|gif|webp|bmp);base64,[A-Za-z0-9+/=\s]+$/i;
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+
+async function ensurePdfWorkerReady(): Promise<void> {
+  if (typeof window === 'undefined') return;
+  const isFileProtocol = window.location.protocol === 'file:';
+  const noWebWorker = typeof Worker === 'undefined';
+  if (isFileProtocol || noWebWorker) {
+    const workerMod = await import('pdfjs-dist/build/pdf.worker.min.mjs');
+    if (!(globalThis as Record<string, unknown>).pdfjsWorker && workerMod?.WorkerMessageHandler) {
+      (globalThis as Record<string, unknown>).pdfjsWorker = workerMod;
+    }
+  }
+}
 
 export type ConversionMode = 'word-to-pdf' | 'pdf-to-word';
 
@@ -41,7 +59,10 @@ export function formatFileSize(bytes: number): string {
 }
 
 export function getOutputFileName(originalName: string, targetExt: 'pdf' | 'docx'): string {
-  const baseName = originalName.replace(/\.[^/.]+$/, '').trim() || 'documento';
+  const safeBase = sanitizeDownloadFileName(originalName)
+    .replace(/\.[^/.]+$/, '')
+    .trim();
+  const baseName = safeBase || 'documento';
   return `${baseName}.${targetExt}`;
 }
 
@@ -163,12 +184,21 @@ function getFontStyle(bold: boolean, italic: boolean): 'normal' | 'bold' | 'ital
 async function normalizeImageToDataUrl(
   src: string
 ): Promise<{ dataUrl: string; format: 'PNG' | 'JPEG'; width: number; height: number } | null> {
+  if (!SAFE_RASTER_DATA_URI_RE.test(src.trim())) {
+    return null;
+  }
+
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
       const width = img.naturalWidth || img.width || 100;
       const height = img.naturalHeight || img.height || 100;
-      if (width <= 0 || height <= 0) {
+      if (
+        width <= 0 ||
+        height <= 0 ||
+        width > MAX_IMAGE_DIMENSION ||
+        height > MAX_IMAGE_DIMENSION
+      ) {
         resolve(null);
         return;
       }
@@ -182,7 +212,7 @@ async function normalizeImageToDataUrl(
         return;
       }
 
-      // Convert WebP, GIF, BMP, SVG etc. to PNG using an offscreen canvas
+      // Convert WebP, GIF, BMP to PNG using an offscreen canvas
       try {
         const canvas = document.createElement('canvas');
         canvas.width = width;
@@ -718,6 +748,10 @@ export async function convertDocxToPdf(
     throw new Error('O arquivo enviado está vazio (0 bytes) e não pode ser convertido.');
   }
 
+  if (file.size > MAX_FILE_SIZE_BYTES) {
+    throw new Error('O arquivo excede o limite de 50 MB permitido para processamento seguro no navegador.');
+  }
+
   const lowerName = file.name.toLowerCase();
   if (lowerName.endsWith('.doc')) {
     throw new Error(
@@ -833,6 +867,10 @@ export async function convertPdfToDocx(
     throw new Error('O arquivo PDF enviado está vazio (0 bytes) e não pode ser convertido.');
   }
 
+  if (file.size > MAX_FILE_SIZE_BYTES) {
+    throw new Error('O arquivo excede o limite de 50 MB permitido para processamento seguro no navegador.');
+  }
+
   if (!file.name.toLowerCase().endsWith('.pdf')) {
     throw new Error('Formato inválido. Por favor, selecione um arquivo no formato .PDF.');
   }
@@ -854,9 +892,11 @@ export async function convertPdfToDocx(
   let pdfDocument: pdfjsLib.PDFDocumentProxy | null = null;
 
   try {
+    await ensurePdfWorkerReady();
     loadingTask = pdfjsLib.getDocument({
       data: new Uint8Array(arrayBuffer),
       useSystemFonts: true,
+      enableXfa: false,
     });
     arrayBuffer = null;
 
@@ -865,6 +905,12 @@ export async function convertPdfToDocx(
 
     if (numPages === 0) {
       throw new Error('O arquivo PDF não possui páginas.');
+    }
+
+    if (numPages > MAX_PDF_PAGES) {
+      throw new Error(
+        `O PDF possui ${numPages} páginas e excede o limite de segurança de ${MAX_PDF_PAGES} páginas por conversão.`
+      );
     }
 
     const pagesLines: ExtractedLine[][] = [];

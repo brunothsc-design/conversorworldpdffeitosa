@@ -9,6 +9,7 @@ import {
   Loader2,
   Lock,
   RefreshCw,
+  Share2,
   ShieldCheck,
   Trash2,
   Zap,
@@ -22,6 +23,12 @@ import {
   convertPdfToDocx,
   formatFileSize,
 } from './services/converter';
+import {
+  canShareFiles,
+  downloadForWebViewOrBrowser,
+  isAndroidWebView,
+  shareConvertedFile,
+} from './utils/webview';
 
 type Status = 'idle' | 'ready' | 'converting' | 'success' | 'error';
 
@@ -206,18 +213,42 @@ export default function App() {
     }
   };
 
-  const handleDownload = () => {
+  const handleDownload = async () => {
     if (!downloadUrl || !result) return;
-    const anchor = document.createElement('a');
-    anchor.href = downloadUrl;
-    anchor.download = result.fileName;
-    document.body.appendChild(anchor);
-    anchor.click();
-    document.body.removeChild(anchor);
+    try {
+      await downloadForWebViewOrBrowser(result.blob, downloadUrl, result.fileName);
+    } catch (err) {
+      const msg =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Não foi possível iniciar o download do arquivo.';
+      setErrorMessage(msg);
+      setStatus('error');
+    }
+  };
+
+  const handleShare = async () => {
+    if (!result) return;
+    try {
+      await shareConvertedFile(result.blob, result.fileName);
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        return;
+      }
+      await handleDownload();
+    }
   };
 
   const isWordToPdf = mode === 'word-to-pdf';
-  const acceptExtension = isWordToPdf ? '.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document' : '.pdf,application/pdf';
+  const runningInWebView = isAndroidWebView();
+  const acceptExtension = runningInWebView
+    ? isWordToPdf
+      ? '*/*'
+      : 'application/pdf,.pdf'
+    : isWordToPdf
+    ? '.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    : '.pdf,application/pdf';
+  const supportsShare = result ? canShareFiles(result.blob, result.fileName) : false;
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
@@ -603,7 +634,7 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-3">
+                  <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center justify-center gap-3">
                     <button
                       type="button"
                       onClick={handleDownload}
@@ -612,6 +643,17 @@ export default function App() {
                       <Download className="h-5 w-5" aria-hidden="true" />
                       <span>{isWordToPdf ? 'Baixar PDF convertido' : 'Baixar Word (.docx)'}</span>
                     </button>
+
+                    {supportsShare && (
+                      <button
+                        type="button"
+                        onClick={handleShare}
+                        className="inline-flex items-center justify-center gap-2 px-6 py-4 rounded-xl bg-white text-blue-700 border border-blue-200 text-base font-semibold hover:bg-blue-50 transition-colors cursor-pointer"
+                      >
+                        <Share2 className="h-4 w-4" aria-hidden="true" />
+                        <span>Compartilhar / Salvar</span>
+                      </button>
+                    )}
 
                     <button
                       type="button"
